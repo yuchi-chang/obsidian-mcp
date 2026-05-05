@@ -1,7 +1,20 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { tools } from "./tools.js";
+import { ensureConfirmed } from "./confirm.js";
+import { errorResult, tools, type ToolDef } from "./tools.js";
+
+function buildHandler(server: McpServer, tool: ToolDef): ToolDef["handler"] {
+  if (!tool.confirm) return tool.handler;
+  const spec = tool.confirm;
+  return async (input: any) => {
+    const outcome = await ensureConfirmed(server, spec, input);
+    if (!outcome.ok) {
+      return errorResult(new Error(outcome.reason ?? "Confirmation required."));
+    }
+    return tool.handler(input);
+  };
+}
 
 async function main() {
   const server = new McpServer(
@@ -17,7 +30,10 @@ async function main() {
         "(Settings → General → Command line interface → Register CLI). " +
         "File-targeting tools accept either `file` (wikilink-style note name) " +
         "or `path` (vault-relative file path). Most tools accept an optional " +
-        "`vault` parameter; when omitted, the most recently focused vault is used.",
+        "`vault` parameter; when omitted, the most recently focused vault is used. " +
+        "Sensitive tools (delete, move, rename-tag, remove-property, eval, enable-plugin) " +
+        "request user confirmation before running — interactively via MCP elicitation when " +
+        "the client supports it, otherwise by requiring `confirm: true` in the tool input.",
     },
   );
 
@@ -30,16 +46,17 @@ async function main() {
         inputSchema: tool.inputSchema,
         annotations: tool.annotations,
       },
-      tool.handler,
+      buildHandler(server, tool),
     );
   }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
+  const sensitive = tools.filter((t) => t.confirm).length;
   // Helpful banner on stderr (stdout is reserved for the MCP protocol).
   process.stderr.write(
-    `obsidian-mcp ready — ${tools.length} tools registered\n`,
+    `obsidian-mcp ready — ${tools.length} tools registered (${sensitive} require confirmation)\n`,
   );
 }
 

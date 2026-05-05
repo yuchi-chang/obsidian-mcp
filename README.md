@@ -140,6 +140,62 @@ If `obsidian` isn't on `PATH`, set the `OBSIDIAN_CLI` env var in your client con
 - **Multi-vault setups** — every tool accepts an optional `vault` parameter. When omitted, the most recently focused vault is used.
 - **Output format** — list/search/metadata tools default to JSON for easy machine parsing.
 
+## Sensitive operations & user confirmation
+
+The following tools are gated behind a user-confirmation step:
+
+| Tool | Reason |
+|---|---|
+| `obsidian_delete_note` | Removes data (especially with `permanent: true`). |
+| `obsidian_move_note` | Renames + rewrites wikilinks across the vault. |
+| `obsidian_remove_property` | Removes frontmatter data. |
+| `obsidian_rename_tag` | Bulk-rewrites tags across every note. |
+| `obsidian_enable_plugin` | Grants a community plugin code execution. |
+| `obsidian_eval` | Runs arbitrary JavaScript inside Obsidian. |
+
+How the gate works:
+
+1. **MCP elicitation (preferred).** If the connected client supports the [`elicitation`](https://modelcontextprotocol.io/specification/draft) capability (Claude Code does), the server sends an `elicitation/create` request and the client shows the user a *Proceed?* prompt with the action and target spelled out. Only `accept + confirm: true` proceeds.
+2. **Explicit `confirm: true` parameter.** Every sensitive tool's input schema includes an optional `confirm: boolean`. Passing `confirm: true` skips the elicitation prompt — use this only when the caller has already obtained user approval.
+3. **Refusal fallback.** If the client doesn't support elicitation and `confirm: true` was not provided, the tool returns an `isError` result that names the action and instructs the caller to retry with `confirm: true`.
+
+### Bypass for batch / automation
+
+```
+OBSIDIAN_MCP_AUTO_CONFIRM=1
+```
+
+Set this env var (in your MCP client's `env` block) to skip every confirmation prompt. Use only in fully-trusted automation contexts.
+
+## Long content & argv limits
+
+The Obsidian CLI does not (yet) support reading parameter values from stdin or from files — every value travels on the command line. That collides with platform limits:
+
+| Platform | Practical command-line limit |
+|---|---|
+| Windows (cmd.exe) | ~8,191 chars total |
+| macOS / Linux | `ARG_MAX` (typically 128 KB – 2 MB) |
+
+To stay safe, the server **automatically chunks** long writes:
+
+| Tool | Chunking strategy |
+|---|---|
+| `obsidian_create_note` | First chunk via `create`, remaining chunks via `append`. |
+| `obsidian_append_note` | Sequential `append` calls. |
+| `obsidian_prepend_note` | `prepend` calls in reverse order so final order is preserved. |
+| `obsidian_daily_append` | Resolves the daily note path, then chunked append. |
+| `obsidian_eval` | **Not chunked** — JS can't be split. Returns an error suggesting the script-via-note workaround. |
+
+Splits happen at line boundaries when possible; oversized single lines fall back to UTF-8-safe character boundaries. Reassembled content is byte-identical to the original.
+
+Configure the per-call byte threshold (defaults: 6,000 on Windows, 100,000 elsewhere):
+
+```
+OBSIDIAN_MCP_MAX_ARG_BYTES=4000
+```
+
+If a chunk in the middle of a multi-chunk write fails, the server returns `isError` with a clear message stating which chunks made it to disk so the caller can recover.
+
 ## Develop
 
 ```bash

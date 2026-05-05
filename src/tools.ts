@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getLimit, shouldChunk, splitForCli } from "./chunk.js";
 import { ObsidianCliError, parseJsonOrText, runObsidian } from "./exec.js";
 
 // ---------- shared schema fragments ----------
@@ -108,7 +109,135 @@ async function runText(
   }
 }
 
+/**
+ * Writes content to a note in chunks when it would overflow the platform's
+ * command-line argument limit. Subsequent chunks are appended after the
+ * initial write so the on-disk content is byte-identical to a single write.
+ *
+ * `firstCommand` runs with the first chunk (e.g. `create` or `append`).
+ * `appendCommand` runs for chunks 2..N and must accept `file=`/`path=` so we
+ * can re-target the just-written note.
+ */
+async function runChunkedWrite(args: {
+  content: string;
+  firstCommand: string;
+  firstParams: Record<string, string | undefined>;
+  appendTarget: { file?: string; path?: string };
+  vault?: string;
+}): Promise<McpToolResult> {
+  const { content, firstCommand, firstParams, appendTarget, vault } = args;
+  const chunks = splitForCli(content);
+
+  if (chunks.length === 1) {
+    // Fast path — fits in one call.
+    return runText(firstCommand, {
+      vault,
+      params: { ...firstParams, content: chunks[0] },
+    });
+  }
+
+  const summary: string[] = [
+    `Content was ${Buffer.byteLength(content, "utf8")} bytes ` +
+      `(over the ${getLimit()}-byte argv limit on this platform); ` +
+      `wrote in ${chunks.length} chunks.`,
+  ];
+
+  // First chunk uses the requested command (create or append).
+  try {
+    const first = await runObsidian(firstCommand, {
+      vault,
+      params: { ...firstParams, content: chunks[0] },
+    });
+    summary.push(`  chunk 1/${chunks.length}: ok`);
+    if (first.stderr.trim()) summary.push(`    stderr: ${first.stderr.trim()}`);
+  } catch (err) {
+    return errorResult(
+      err instanceof Error
+        ? new Error(
+            `Failed on chunk 1/${chunks.length}; note state unchanged.\n${err.message}`,
+          )
+        : err,
+    );
+  }
+
+  // Remaining chunks always go through `append` against the new note.
+  for (let i = 1; i < chunks.length; i++) {
+    try {
+      await runObsidian("append", {
+        vault,
+        params: { ...appendTarget, content: chunks[i] },
+      });
+      summary.push(`  chunk ${i + 1}/${chunks.length}: ok`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      summary.push(`  chunk ${i + 1}/${chunks.length}: FAILED — ${msg}`);
+      summary.push(
+        `Note is in a partially-written state; chunks 1..${i} were written.`,
+      );
+      return {
+        content: [{ type: "text", text: summary.join("\n") }],
+        isError: true,
+      };
+    }
+  }
+
+  return textResult(summary.join("\n"));
+}
+
+/**
+ * Prepend variant. The CLI's `prepend` inserts after frontmatter, at the top.
+ * To keep the final order [chunk1..chunkN] when the user asks to prepend, we
+ * issue prepend calls in REVERSE order — last chunk first, first chunk last —
+ * so each later prepend pushes earlier chunks down.
+ */
+async function runChunkedPrepend(args: {
+  content: string;
+  target: { file?: string; path?: string };
+  vault?: string;
+}): Promise<McpToolResult> {
+  const { content, target, vault } = args;
+  const chunks = splitForCli(content);
+
+  if (chunks.length === 1) {
+    return runText("prepend", { vault, params: { ...target, content: chunks[0] } });
+  }
+
+  const summary: string[] = [
+    `Content was ${Buffer.byteLength(content, "utf8")} bytes; ` +
+      `prepended in ${chunks.length} chunks (reverse order to preserve sequence).`,
+  ];
+
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    try {
+      await runObsidian("prepend", {
+        vault,
+        params: { ...target, content: chunks[i] },
+      });
+      summary.push(`  chunk ${i + 1}/${chunks.length}: ok`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      summary.push(`  chunk ${i + 1}/${chunks.length}: FAILED — ${msg}`);
+      summary.push(
+        `Note is in a partially-written state; chunks ${i + 2}..${chunks.length} were prepended.`,
+      );
+      return {
+        content: [{ type: "text", text: summary.join("\n") }],
+        isError: true,
+      };
+    }
+  }
+
+  return textResult(summary.join("\n"));
+}
+
 // ---------- tool definitions ----------
+
+export interface ConfirmSpec {
+  /** Headline shown in the confirmation prompt. */
+  action: (input: any) => string;
+  /** One-line detail line — typically restates the target. */
+  detail: (input: any) => string;
+}
 
 export interface ToolDef {
   name: string;
@@ -121,8 +250,24 @@ export interface ToolDef {
     idempotentHint?: boolean;
     openWorldHint?: boolean;
   };
+  /** Present on tools that require user confirmation before running. */
+  confirm?: ConfirmSpec;
   handler: (input: any) => Promise<McpToolResult>;
 }
+
+/** Optional `confirm` param injected into every sensitive tool's input schema. */
+const ConfirmArg = {
+  confirm: z
+    .boolean()
+    .optional()
+    .describe(
+      "Set to true to skip the interactive confirmation prompt. " +
+        "Use only when the caller has already confirmed with the user.",
+    ),
+};
+
+export { errorResult, textResult };
+export type { McpToolResult };
 
 export const tools: ToolDef[] = [
   // ---------- file listing ----------
@@ -214,6 +359,15 @@ export const tools: ToolDef[] = [
           new Error("Provide either `content` or `template`, not both."),
         );
       }
+      if (content && shouldChunk(content)) {
+        return runChunkedWrite({
+          content,
+          firstCommand: "create",
+          firstParams: { name, template },
+          appendTarget: { path: name },
+          vault,
+        });
+      }
       return runText("create", {
         vault,
         params: { name, content, template },
@@ -232,6 +386,15 @@ export const tools: ToolDef[] = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     handler: async ({ vault, file, path, content }) => {
       requireFileTarget({ file, path });
+      if (shouldChunk(content)) {
+        return runChunkedWrite({
+          content,
+          firstCommand: "append",
+          firstParams: { file, path },
+          appendTarget: { file, path },
+          vault,
+        });
+      }
       return runText("append", { vault, params: { file, path, content } });
     },
   },
@@ -248,6 +411,9 @@ export const tools: ToolDef[] = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     handler: async ({ vault, file, path, content }) => {
       requireFileTarget({ file, path });
+      if (shouldChunk(content)) {
+        return runChunkedPrepend({ content, target: { file, path }, vault });
+      }
       return runText("prepend", { vault, params: { file, path, content } });
     },
   },
@@ -262,8 +428,13 @@ export const tools: ToolDef[] = [
         .string()
         .min(1)
         .describe("Destination path (vault-relative). Include filename."),
+      ...ConfirmArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    confirm: {
+      action: () => "Move/rename a note",
+      detail: ({ file, path, to }) => `${file ?? path} → ${to}`,
+    },
     handler: async ({ vault, file, path, to }) => {
       requireFileTarget({ file, path });
       return runText("move", { vault, params: { file, path, to } });
@@ -282,8 +453,16 @@ export const tools: ToolDef[] = [
         .optional()
         .default(false)
         .describe("When true, deletes immediately instead of moving to trash."),
+      ...ConfirmArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    confirm: {
+      action: ({ permanent }) =>
+        permanent
+          ? "PERMANENTLY delete a note (bypasses trash — irreversible)"
+          : "Move a note to trash",
+      detail: ({ file, path }) => `${file ?? path}`,
+    },
     handler: async ({ vault, file, path, permanent }) => {
       requireFileTarget({ file, path });
       return runText("delete", {
@@ -333,8 +512,13 @@ export const tools: ToolDef[] = [
       ...VaultArg,
       ...FileTargetArg,
       name: z.string().min(1).describe("Property name to remove."),
+      ...ConfirmArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    confirm: {
+      action: () => "Remove a frontmatter property",
+      detail: ({ file, path, name }) => `${file ?? path} — property "${name}"`,
+    },
     handler: async ({ vault, file, path, name }) => {
       requireFileTarget({ file, path });
       return runText("property:remove", {
@@ -410,8 +594,13 @@ export const tools: ToolDef[] = [
       ...VaultArg,
       old: z.string().min(1).describe("Existing tag name (e.g. '#old')."),
       new: z.string().min(1).describe("New tag name (e.g. '#new')."),
+      ...ConfirmArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    confirm: {
+      action: () => "Rename a tag across the entire vault",
+      detail: ({ old, new: newTag }) => `${old} → ${newTag}`,
+    },
     handler: async ({ vault, old, new: newTag }) =>
       runText("tags:rename", { vault, params: { old, new: newTag } }),
   },
@@ -474,8 +663,32 @@ export const tools: ToolDef[] = [
       content: z.string().min(1).describe("Markdown content to append."),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    handler: async ({ vault, content }) =>
-      runText("daily:append", { vault, params: { content } }),
+    handler: async ({ vault, content }) => {
+      if (shouldChunk(content)) {
+        // Resolve daily note path so the follow-up appends target the right file.
+        try {
+          const pathRes = await runObsidian("daily:path", { vault });
+          const dailyPath = pathRes.stdout.trim();
+          if (!dailyPath) {
+            return errorResult(
+              new Error(
+                "Could not resolve daily note path for chunked write — daily:path returned empty.",
+              ),
+            );
+          }
+          return runChunkedWrite({
+            content,
+            firstCommand: "daily:append",
+            firstParams: {},
+            appendTarget: { path: dailyPath },
+            vault,
+          });
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+      return runText("daily:append", { vault, params: { content } });
+    },
   },
   {
     name: "obsidian_daily_path",
@@ -502,8 +715,13 @@ export const tools: ToolDef[] = [
     inputSchema: {
       ...VaultArg,
       id: z.string().min(1).describe("Plugin id (e.g. 'dataview')."),
+      ...ConfirmArg,
     },
     annotations: { readOnlyHint: false, idempotentHint: true },
+    confirm: {
+      action: () => "Enable a community plugin (grants it code execution)",
+      detail: ({ id }) => `plugin id: ${id}`,
+    },
     handler: async ({ vault, id }) =>
       runText("plugin:enable", { vault, params: { id } }),
   },
@@ -542,10 +760,30 @@ export const tools: ToolDef[] = [
     inputSchema: {
       ...VaultArg,
       code: z.string().min(1).describe("JavaScript code to evaluate."),
+      ...ConfirmArg,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-    handler: async ({ vault, code }) =>
-      runText("eval", { vault, params: { code } }),
+    confirm: {
+      action: () => "Evaluate arbitrary JavaScript inside Obsidian",
+      detail: ({ code }) => {
+        const oneLine = code.replace(/\s+/g, " ").trim();
+        return oneLine.length > 140 ? oneLine.slice(0, 140) + "…" : oneLine;
+      },
+    },
+    handler: async ({ vault, code }) => {
+      if (shouldChunk(code)) {
+        return errorResult(
+          new Error(
+            `Eval code is ${Buffer.byteLength(code, "utf8")} bytes, over the ` +
+              `${getLimit()}-byte argv limit on this platform. JavaScript cannot ` +
+              `be chunked — write the script to a note via append (which auto-chunks) ` +
+              `then load it inside a smaller eval, e.g. ` +
+              `\`new Function(await app.vault.adapter.read('script.md'))()\`.`,
+          ),
+        );
+      }
+      return runText("eval", { vault, params: { code } });
+    },
   },
   {
     name: "obsidian_dev_screenshot",
