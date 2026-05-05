@@ -12,9 +12,58 @@ This server is a thin, comprehensive wrapper. Every tool maps 1:1 to an `obsidia
 
 ## Install
 
-The recommended way is via `npx` — no clone, no build, no absolute paths.
+Two paths depending on whether you want to build it yourself or grab a pre-published version from npm.
 
-### Claude Code / `.mcp.json`
+### Option A — Clone & build (works today)
+
+Clone the repo and build locally, then point Claude Code at the built file:
+
+```bash
+git clone https://github.com/yuchichang/obsidian-mcp.git
+cd obsidian-mcp
+npm install
+npm run build
+```
+
+Register it with Claude Code (one command):
+
+```bash
+# Add (user scope — available across all projects)
+claude mcp add -s user obsidian -- node /absolute/path/to/obsidian-mcp/dist/index.js
+
+# Remove
+claude mcp remove obsidian
+
+# List configured servers
+claude mcp list
+```
+
+`-s user` registers it for your whole user account. Use `-s project` to commit it to the repo's `.mcp.json` instead, or `-s local` for the current project only (default).
+
+Or write it into `.mcp.json` manually:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "node",
+      "args": ["/absolute/path/to/obsidian-mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+### Option B — Install from npm (zero-build)
+
+> **Prerequisite:** the package must already be published to npm. The maintainer publishes once via `npm publish`; all subsequent users get it via `npx` automatically. If you forked this repo and want this flow under your own scope, change `name` in `package.json` to `@<your-npm-username>/obsidian-mcp`, then `npm publish`.
+
+Once published, no clone or build needed:
+
+```bash
+claude mcp add -s user obsidian -- npx -y @yuchichang/obsidian-mcp
+```
+
+Or in `.mcp.json` / Claude Desktop's `claude_desktop_config.json`:
 
 ```json
 {
@@ -27,45 +76,19 @@ The recommended way is via `npx` — no clone, no build, no absolute paths.
 }
 ```
 
-### Claude Desktop / `claude_desktop_config.json`
-
-Same shape as above. Restart Claude Desktop after saving.
-
 ### Override the CLI path
 
-If `obsidian` isn't on `PATH`, set the `OBSIDIAN_CLI` env var in your client config:
-
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "command": "npx",
-      "args": ["-y", "@yuchichang/obsidian-mcp"],
-      "env": {
-        "OBSIDIAN_CLI": "C:/Users/you/AppData/Local/Obsidian/obsidian.cmd"
-      }
-    }
-  }
-}
-```
-
-### Build from source (alternative)
-
-```bash
-git clone https://github.com/yuchichang/obsidian-mcp.git
-cd obsidian-mcp
-npm install
-npm run build
-```
-
-Then point your MCP client at the built file:
+If `obsidian` isn't on `PATH`, set the `OBSIDIAN_CLI` env var. Works with either install path:
 
 ```json
 {
   "mcpServers": {
     "obsidian": {
       "command": "node",
-      "args": ["/absolute/path/to/obsidian-mcp/dist/index.js"]
+      "args": ["/absolute/path/to/obsidian-mcp/dist/index.js"],
+      "env": {
+        "OBSIDIAN_CLI": "C:/Users/you/AppData/Local/Obsidian/obsidian.cmd"
+      }
     }
   }
 }
