@@ -12,14 +12,7 @@ This server is a thin, comprehensive wrapper. Every tool maps 1:1 to an `obsidia
 
 ## Install
 
-```bash
-npm install
-npm run build
-```
-
-This produces `dist/index.js`, the stdio MCP server entrypoint.
-
-## Configure your MCP client
+The recommended way is via `npx` — no clone, no build, no absolute paths.
 
 ### Claude Code / `.mcp.json`
 
@@ -27,8 +20,8 @@ This produces `dist/index.js`, the stdio MCP server entrypoint.
 {
   "mcpServers": {
     "obsidian": {
-      "command": "node",
-      "args": ["E:/AgentProject/obsidian-mcp/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "@yuchichang/obsidian-mcp"]
     }
   }
 }
@@ -46,11 +39,33 @@ If `obsidian` isn't on `PATH`, set the `OBSIDIAN_CLI` env var in your client con
 {
   "mcpServers": {
     "obsidian": {
-      "command": "node",
-      "args": ["E:/AgentProject/obsidian-mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@yuchichang/obsidian-mcp"],
       "env": {
         "OBSIDIAN_CLI": "C:/Users/you/AppData/Local/Obsidian/obsidian.cmd"
       }
+    }
+  }
+}
+```
+
+### Build from source (alternative)
+
+```bash
+git clone https://github.com/yuchichang/obsidian-mcp.git
+cd obsidian-mcp
+npm install
+npm run build
+```
+
+Then point your MCP client at the built file:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "node",
+      "args": ["/absolute/path/to/obsidian-mcp/dist/index.js"]
     }
   }
 }

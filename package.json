@@ -1,6 +1,6 @@
 {
-  "name": "obsidian-mcp",
-  "version": "0.1.0",
+  "name": "@yuchichang/obsidian-mcp",
+  "version": "1.0.0",
   "description": "MCP server that wraps the official Obsidian CLI",
   "type": "module",
   "bin": {
@@ -15,7 +15,30 @@
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "inspect": "npx -y @modelcontextprotocol/inspector node dist/index.js",
-    "test": "node scripts/chunk-test.mjs && node scripts/smoke-test.mjs && node scripts/confirm-test.mjs"
+    "test": "node scripts/chunk-test.mjs && node scripts/smoke-test.mjs && node scripts/confirm-test.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "obsidian",
+    "obsidian-cli",
+    "claude",
+    "llm",
+    "agent"
+  ],
+  "author": "yuchichang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuchichang/obsidian-mcp.git"
+  },
+  "homepage": "https://github.com/yuchichang/obsidian-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/yuchichang/obsidian-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
