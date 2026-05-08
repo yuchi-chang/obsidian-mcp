@@ -1,17 +1,7 @@
-import { exec as execCallback } from "node:child_process";
+import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 
-const exec = promisify(execCallback);
-
-const SAFE_ARG = /^[A-Za-z0-9=_\-./:\\@]+$/;
-
-function shellQuote(arg: string): string {
-  if (SAFE_ARG.test(arg)) return arg;
-  if (process.platform === "win32") {
-    return `"${arg.replace(/"/g, '""')}"`;
-  }
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
-}
+const execFile = promisify(execFileCallback);
 
 export type ParamValue = string | number | boolean | undefined | null;
 
@@ -67,10 +57,13 @@ export async function runObsidian(
 ): Promise<RunResult> {
   const bin = process.env.OBSIDIAN_CLI ?? "obsidian";
   const args = buildArgs(command, opts);
-  const cmdline = [bin, ...args].map(shellQuote).join(" ");
+  // Diagnostic only — execFile passes `args` as argv, never as a shell string.
+  // This avoids cmd.exe's ~8191-char limit AND its truncation of LF-bearing
+  // arguments (which corrupted multi-line content like frontmatter blocks).
+  const cmdline = [bin, ...args].join(" ");
 
   try {
-    const { stdout, stderr } = await exec(cmdline, {
+    const { stdout, stderr } = await execFile(bin, args, {
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
     });

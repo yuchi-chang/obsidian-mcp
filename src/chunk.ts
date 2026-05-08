@@ -1,11 +1,13 @@
 // Splits long content strings into chunks small enough to pass via the
 // platform's command-line argument limit. The Obsidian CLI does not yet
 // support stdin or @file syntax for `content=`, so the value must travel
-// on argv. Windows cmd.exe caps the entire command line at ~8191 chars;
-// POSIX ARG_MAX is much higher but still finite.
+// on argv. We invoke the CLI via execFile (CreateProcess directly on
+// Windows, no cmd.exe), so the limit is the OS argv cap — ~32767 chars
+// on Windows, ARG_MAX on POSIX (typically 128KB+). Leave headroom for
+// the other args (vault, command, path, format, …) and quoting.
 
 const DEFAULT_LIMIT_BYTES =
-  process.platform === "win32" ? 6_000 : 100_000;
+  process.platform === "win32" ? 24_000 : 100_000;
 
 function configuredLimit(): number {
   const env = process.env.OBSIDIAN_MCP_MAX_ARG_BYTES;

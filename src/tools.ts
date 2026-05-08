@@ -1,6 +1,18 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getLimit, shouldChunk, splitForCli } from "./chunk.js";
 import { ObsidianCliError, parseJsonOrText, runObsidian } from "./exec.js";
+import { findSimilarFolders, type FolderMatch } from "./folderSearch.js";
+import {
+  getStats,
+  loadStore,
+  recordUse,
+  removeTopic as removeTopicEntry,
+} from "./topicStore.js";
+
+export interface ToolContext {
+  server: McpServer;
+}
 
 // ---------- shared schema fragments ----------
 
@@ -184,6 +196,224 @@ async function runChunkedWrite(args: {
   return textResult(summary.join("\n"));
 }
 
+function joinVaultPath(folder: string, name: string): string {
+  const f = folder.replace(/^[\\/]+/, "").replace(/[\\/]+$/, "");
+  return f ? `${f}/${name}` : name;
+}
+
+interface RouteResult {
+  ok: boolean;
+  path: string;
+  reason: string;
+  trail: string[];
+}
+
+/**
+ * Resolves a topic to a folder: stored map → similarity scan → user
+ * elicitation → record. Falls back to topic-as-folder if elicitation isn't
+ * available.
+ */
+async function routeForTopic(args: {
+  ctx: ToolContext;
+  topic: string;
+  name: string;
+  vault?: string;
+  vaultKey: string;
+  preDecidedFolder?: string;
+}): Promise<RouteResult> {
+  const { ctx, topic, name, vault, vaultKey, preDecidedFolder } = args;
+  const trail: string[] = [];
+
+  // 1. Pre-decided folder (agent already obtained user approval upstream).
+  if (preDecidedFolder) {
+    const entry = recordUse(vaultKey, topic, preDecidedFolder);
+    trail.push(
+      `[routed] topic="${topic}" → ${entry.folder} (recorded; ${entry.uses} use${entry.uses === 1 ? "" : "s"})`,
+    );
+    return { ok: true, path: joinVaultPath(entry.folder, name), reason: "pre-decided", trail };
+  }
+
+  // 2. Hit in persistent store.
+  const store = loadStore(vaultKey);
+  const known = store.topics[topic];
+  if (known) {
+    const entry = recordUse(vaultKey, topic, known.folder);
+    trail.push(
+      `[routed] topic="${topic}" → ${entry.folder} (stored route; ${entry.uses} use${entry.uses === 1 ? "" : "s"})`,
+    );
+    return { ok: true, path: joinVaultPath(entry.folder, name), reason: "stored", trail };
+  }
+
+  // 3. Unknown topic — scan vault for similar folders.
+  let suggestions: FolderMatch[] = [];
+  try {
+    suggestions = await findSimilarFolders({ topic, vault, threshold: 0.25, limit: 5 });
+  } catch (err) {
+    trail.push(
+      `[warn] could not scan vault folders: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // 4. Try to ask the user via elicitation.
+  //
+  // Two-stage flow when we have suggestions:
+  //   Stage 1 — enum single-select: existing matches + topic-default + "Vault root" + "Other...".
+  //             Lets the user accept a preselected default in one click instead of forcing them
+  //             to type into a blank textbox (the previous schema had no default/enum, so clients
+  //             rejected an empty submission and bounced the user back to typing).
+  //   Stage 2 — only if user picks "Other...": free-text input with the topic-default prefilled.
+  // When there are no suggestions we skip stage 1 and go straight to stage 2.
+  const caps = ctx.server.server.getClientCapabilities();
+  if (caps?.elicitation) {
+    const OTHER = "__other__";
+    const ROOT = "__root__";
+    const defaultFolder = defaultFolderForTopic(topic);
+
+    let chosenFolder: string | null = null;
+    let elicitationFailed = false;
+
+    if (suggestions.length > 0) {
+      const values: string[] = [];
+      const labels: string[] = [];
+      for (const s of suggestions) {
+        values.push(s.folder);
+        labels.push(`${s.folder}  (similarity ${s.score.toFixed(2)})`);
+      }
+      if (!suggestions.some((s) => s.folder === defaultFolder)) {
+        values.push(defaultFolder);
+        labels.push(`${defaultFolder}  (new — based on topic)`);
+      }
+      values.push(ROOT);
+      labels.push("Vault root (no folder)");
+      values.push(OTHER);
+      labels.push("Other... (type a custom folder)");
+
+      try {
+        const pick = await ctx.server.server.elicitInput({
+          message: `Topic "${topic}" is new in vault "${vaultKey}". Where should these notes live?`,
+          requestedSchema: {
+            type: "object",
+            properties: {
+              choice: {
+                type: "string",
+                title: "Folder",
+                description: `Vault-relative folder for topic "${topic}".`,
+                enum: values,
+                enumNames: labels,
+                default: values[0],
+              },
+            },
+            required: ["choice"],
+          },
+        });
+
+        if (pick.action !== "accept") {
+          return {
+            ok: false,
+            path: "",
+            reason: `User ${pick.action}ed the folder prompt.`,
+            trail,
+          };
+        }
+
+        const choice = String(pick.content?.choice ?? "").trim();
+        if (choice === ROOT) {
+          chosenFolder = "";
+        } else if (choice && choice !== OTHER) {
+          chosenFolder = choice;
+        }
+        // choice === OTHER → fall through to stage 2
+      } catch (err) {
+        trail.push(
+          `[warn] elicitation (stage 1) failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        elicitationFailed = true;
+      }
+    }
+
+    if (chosenFolder === null && !elicitationFailed) {
+      const stage2Message =
+        suggestions.length > 0
+          ? `Type a vault-relative folder path for topic "${topic}". Use "/" for vault root.`
+          : `Topic "${topic}" is new and no similar folders were found. Type a vault-relative folder path. Use "/" for vault root.`;
+
+      try {
+        const typed = await ctx.server.server.elicitInput({
+          message: stage2Message,
+          requestedSchema: {
+            type: "object",
+            properties: {
+              folder: {
+                type: "string",
+                title: "Folder",
+                description: `Vault-relative folder for topic "${topic}". Use "/" for vault root.`,
+                default: defaultFolder,
+              },
+            },
+            required: ["folder"],
+          },
+        });
+
+        if (typed.action !== "accept") {
+          return {
+            ok: false,
+            path: "",
+            reason: `User ${typed.action}ed the folder prompt.`,
+            trail,
+          };
+        }
+
+        const raw = String(typed.content?.folder ?? "").trim();
+        if (!raw) {
+          return {
+            ok: false,
+            path: "",
+            reason: "User did not provide a folder.",
+            trail,
+          };
+        }
+        chosenFolder = raw === "/" || raw === "." ? "" : raw;
+      } catch (err) {
+        trail.push(
+          `[warn] elicitation (stage 2) failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        elicitationFailed = true;
+      }
+    }
+
+    if (chosenFolder !== null) {
+      const entry = recordUse(vaultKey, topic, chosenFolder);
+      trail.push(
+        chosenFolder === ""
+          ? `[routed] topic="${topic}" → (vault root) (newly registered via prompt)`
+          : `[routed] topic="${topic}" → ${entry.folder} (newly registered via prompt)`,
+      );
+      return { ok: true, path: joinVaultPath(chosenFolder, name), reason: "prompted", trail };
+    }
+    // elicitationFailed === true → fall through to step 5 fallback below.
+  }
+
+  // 5. Fallback: topic-as-folder (no client elicitation support).
+  const auto = defaultFolderForTopic(topic);
+  const entry = recordUse(vaultKey, topic, auto);
+  trail.push(
+    `[routed] topic="${topic}" → ${entry.folder} (auto: client did not prompt user; topic registered)`,
+  );
+  if (suggestions.length) {
+    trail.push(
+      `[hint] vault has similar folders (${suggestions.map((s) => s.folder).join(", ")}). ` +
+        `If one of those is the right home, call obsidian_register_topic to switch.`,
+    );
+  }
+  return { ok: true, path: joinVaultPath(entry.folder, name), reason: "auto-fallback", trail };
+}
+
+function defaultFolderForTopic(topic: string): string {
+  // "recipe-chinese" → "Recipe Chinese" → "Recipe Chinese"; we keep dashes
+  // since that's the user's chosen format.
+  return topic.replace(/^[\\/]+|[\\/]+$/g, "");
+}
+
 /**
  * Prepend variant. The CLI's `prepend` inserts after frontmatter, at the top.
  * To keep the final order [chunk1..chunkN] when the user asks to prepend, we
@@ -252,7 +482,7 @@ export interface ToolDef {
   };
   /** Present on tools that require user confirmation before running. */
   confirm?: ConfirmSpec;
-  handler: (input: any) => Promise<McpToolResult>;
+  handler: (input: any, ctx: ToolContext) => Promise<McpToolResult>;
 }
 
 /** Optional `confirm` param injected into every sensitive tool's input schema. */
@@ -336,13 +566,44 @@ export const tools: ToolDef[] = [
     name: "obsidian_create_note",
     title: "Create a new note",
     description:
-      "Creates a new note. `name` is the path (relative to the vault root), with or without the .md extension.",
+      "Creates a new note. **Use `path` for the note location** — `name`, `file`, " +
+      "and `filename` are NOT accepted (the schema is strict; unknown fields are rejected).\n\n" +
+      "`path` is vault-root-relative. Missing folders along the path are auto-created by " +
+      "the underlying Obsidian CLI.\n\n" +
+      "If `path` contains no '/', the optional `topic` facet routes the note via the " +
+      "vault-aware topic store (~/.obsidian-mcp/<vault>/topic-map.json):\n" +
+      "  • Known topic → reuse stored folder (silent).\n" +
+      "  • Unknown topic → MCP scans existing vault folders for similar names and " +
+      "asks the user via elicitation: reuse a match, or specify a folder. The chosen " +
+      "folder is recorded for next time.\n" +
+      "  • Explicit paths in `path` (with '/') always bypass routing.\n" +
+      "Use `obsidian_topic_stats` to inspect the learned map; " +
+      "`obsidian_register_topic` to set a route programmatically.",
     inputSchema: {
       ...VaultArg,
-      name: z
+      path: z
         .string()
         .min(1)
-        .describe("Note path/name relative to the vault root."),
+        .describe(
+          "Vault-relative path or bare note name. Including a '/' selects an explicit " +
+            "folder and bypasses topic routing; otherwise the note is created at the vault " +
+            "root (or routed via `topic`). Missing folders are auto-created by the CLI.",
+        ),
+      topic: z
+        .string()
+        .optional()
+        .describe(
+          "Optional topic facet (e.g. 'recipe-chinese', 'meeting'). " +
+            "Used to route the note via the persistent topic store. Ignored when `path` contains '/'.",
+        ),
+      folder: z
+        .string()
+        .optional()
+        .describe(
+          "Pre-decided folder for this topic (vault-relative). When supplied with " +
+            "`topic`, the route is recorded without prompting the user. Useful for " +
+            "agent-side prompts that already obtained the user's choice.",
+        ),
       content: z
         .string()
         .optional()
@@ -353,25 +614,85 @@ export const tools: ToolDef[] = [
         .describe("Template name to apply (mutually exclusive with content)."),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    handler: async ({ vault, name, content, template }) => {
+    handler: async ({ vault, path, topic, folder, content, template }, ctx) => {
       if (content && template) {
         return errorResult(
           new Error("Provide either `content` or `template`, not both."),
         );
       }
-      if (content && shouldChunk(content)) {
-        return runChunkedWrite({
-          content,
-          firstCommand: "create",
-          firstParams: { name, template },
-          appendTarget: { path: name },
+
+      const cleanPath = path.replace(/^[\\/]+/, "");
+      const explicitInPath = /[\\/]/.test(cleanPath);
+      const vaultKey = vault ?? "_default";
+      const trail: string[] = [];
+
+      let finalPath = cleanPath;
+
+      if (explicitInPath) {
+        trail.push(`[routed] explicit path → ${cleanPath}`);
+      } else if (topic) {
+        const routed = await routeForTopic({
+          ctx,
+          topic,
+          name: cleanPath,
           vault,
+          vaultKey,
+          preDecidedFolder: folder,
         });
+        if (!routed.ok) return errorResult(new Error(routed.reason));
+        finalPath = routed.path;
+        trail.push(...routed.trail);
+      } else if (folder) {
+        // No topic but explicit folder — just prepend, don't record (no key to store under).
+        finalPath = joinVaultPath(folder, cleanPath);
+        trail.push(`[routed] folder=${folder} (not stored — no topic given) → ${finalPath}`);
+      } else {
+        // No topic, no folder — write at vault root.
+        trail.push(`[routed] vault root (no topic) → ${cleanPath}`);
       }
-      return runText("create", {
-        vault,
-        params: { name, content, template },
-      });
+
+      const annotate = (result: McpToolResult): McpToolResult => {
+        if (trail.length === 0) return result;
+        return {
+          ...result,
+          content: [
+            { type: "text", text: trail.join("\n") },
+            ...result.content,
+          ],
+        };
+      };
+
+      // The CLI rejects `name=` when it contains '/' ("name cannot contain '/'.
+      // Use path for a full file path."). Switch to `path=` for routed/explicit
+      // folders, and ensure the `.md` suffix the CLI adds automatically for
+      // `name=` is also present for `path=`.
+      const useExplicitPath = /[\\/]/.test(finalPath);
+      const pathForCli = useExplicitPath
+        ? finalPath.toLowerCase().endsWith(".md")
+          ? finalPath
+          : `${finalPath}.md`
+        : finalPath;
+      const createTarget = useExplicitPath
+        ? { path: pathForCli }
+        : { name: finalPath };
+
+      if (content && shouldChunk(content)) {
+        return annotate(
+          await runChunkedWrite({
+            content,
+            firstCommand: "create",
+            firstParams: { ...createTarget, template },
+            appendTarget: { path: pathForCli },
+            vault,
+          }),
+        );
+      }
+      return annotate(
+        await runText("create", {
+          vault,
+          params: { ...createTarget, content, template },
+        }),
+      );
     },
   },
   {
@@ -811,7 +1132,67 @@ export const tools: ToolDef[] = [
     handler: async ({ vault }) => runText("dev:console", { vault }),
   },
 
-  // ---------- meta ----------
+  // ---------- topic store (faceted classification) ----------
+  {
+    name: "obsidian_topic_stats",
+    title: "Show learned topic → folder routes",
+    description:
+      "Returns the persistent topic store for the given vault — every topic the MCP " +
+      "has routed, the folder it landed in, and how often it's been used. Sorted by usage. " +
+      "Use this before calling `obsidian_create_note` with a `topic` so you can pick a " +
+      "topic that's already known to the vault.",
+    inputSchema: { ...VaultArg },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async ({ vault }) => {
+      const stats = getStats(vault ?? "_default");
+      return textResult(JSON.stringify(stats, null, 2), stats);
+    },
+  },
+  {
+    name: "obsidian_register_topic",
+    title: "Register or update a topic → folder route",
+    description:
+      "Programmatically registers (or overwrites) a topic → folder mapping in the " +
+      "persistent topic store. Use when the user has explicitly told you where a kind " +
+      "of note should live, so future writes for the same topic land there silently.",
+    inputSchema: {
+      ...VaultArg,
+      topic: z.string().min(1).describe("Topic key (e.g. 'recipe-chinese')."),
+      folder: z
+        .string()
+        .min(1)
+        .describe("Vault-relative folder where this topic's notes should live."),
+    },
+    annotations: { readOnlyHint: false, idempotentHint: true },
+    handler: async ({ vault, topic, folder }) => {
+      const cleaned = folder.replace(/^[\\/]+/, "").replace(/[\\/]+$/, "");
+      if (cleaned.split(/[\\/]+/).some((p: string) => p === "..")) {
+        return errorResult(new Error("Folder must be vault-relative; '..' not allowed."));
+      }
+      const entry = recordUse(vault ?? "_default", topic, cleaned);
+      return textResult(
+        `Registered: "${topic}" → ${entry.folder} (uses: ${entry.uses}).`,
+        entry as unknown as Record<string, unknown>,
+      );
+    },
+  },
+  {
+    name: "obsidian_remove_topic",
+    title: "Remove a topic from the persistent store",
+    description:
+      "Forgets a topic → folder mapping. Existing notes in the folder are not touched.",
+    inputSchema: {
+      ...VaultArg,
+      topic: z.string().min(1),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    handler: async ({ vault, topic }) => {
+      const removed = removeTopicEntry(vault ?? "_default", topic);
+      return textResult(
+        removed ? `Removed topic "${topic}".` : `Topic "${topic}" was not in the store.`,
+      );
+    },
+  },
   {
     name: "obsidian_version",
     title: "Get Obsidian CLI version",

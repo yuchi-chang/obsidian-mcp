@@ -167,6 +167,9 @@ If `obsidian` isn't on `PATH`, set the `OBSIDIAN_CLI` env var. Works with either
 
 | Tool | Wraps |
 |---|---|
+| `obsidian_topic_stats` | reports the persistent topic → folder map for a vault |
+| `obsidian_register_topic` | binds a topic to a folder (no prompt) |
+| `obsidian_remove_topic` | removes a topic from the persistent store |
 | `obsidian_version` | `obsidian version` |
 | `obsidian_help` | `obsidian help` |
 
@@ -204,6 +207,57 @@ OBSIDIAN_MCP_AUTO_CONFIRM=1
 ```
 
 Set this env var (in your MCP client's `env` block) to skip every confirmation prompt. Use only in fully-trusted automation contexts.
+
+## Topic → folder routing (vault-aware, persistent)
+
+The MCP runs a per-vault topic store at `~/.obsidian-mcp/<vault>/topic-map.json`. It learns where each topic of note belongs and reuses that decision next time.
+
+```
+Agent: create_note(path="kungpao.md", topic="recipe-chinese", vault="MyVault")
+   ↓
+MCP: is "recipe-chinese" already in the store?
+   ├── yes → use the stored folder, increment usage, write
+   └── no  → scan vault for similar folders ("Recipes/Chinese", "食譜/中式" …)
+            → MCP elicits the user: "Where should 'recipe-chinese' notes live?
+              Suggestions: ..."
+            → user types or picks a folder
+            → MCP records the route, then writes
+```
+
+What lives where, and why:
+
+- The persistent store, not env vars, is the source of truth — the MCP is the only thing that sees vault state across sessions, so storing the conventions there is what gives this layer its leverage.
+- The user is asked **once** per topic; subsequent notes for the same topic land silently.
+- Folders are auto-created by the Obsidian CLI as deep as needed — no `mkdir` from the MCP.
+
+### Resolution order
+
+| | Condition | Action |
+|---|---|---|
+| 1 | `path` contains `/` | Used as-is, topic ignored. |
+| 2 | `topic` present in store | Reuse stored folder, increment usage. |
+| 3 | `folder` arg passed alongside `topic` | Treat as pre-decided; record in store. |
+| 4 | `topic` unknown, client supports elicitation | Scan vault, prompt user, record answer. |
+| 5 | `topic` unknown, no elicitation | Auto-create `<topic>/` folder, record, hint at similar existing folders in the response. |
+| 6 | No topic, no folder | Write at vault root. |
+
+### Topic-store tools
+
+| Tool | What it does |
+|---|---|
+| `obsidian_topic_stats` | Show the learned map for a vault, sorted by usage. |
+| `obsidian_register_topic` | Bind `topic → folder` programmatically (no elicitation). |
+| `obsidian_remove_topic` | Forget a topic from the store (existing notes untouched). |
+
+### Theory pointers
+
+Faceted folder routing here is the simplest slice of a much larger idea. Worth reading if you want to push further:
+
+- Ranganathan, S.R. (1933) *Colon Classification* — PMEST facets
+- Ranganathan, S.R. (1931) *Five Laws of Library Science*
+- Tiago Forte (2022) *Building a Second Brain* — PARA method (actionability axis)
+- Niklas Luhmann (1981) "Kommunikation mit Zettelkästen" — graph-over-tree
+- Bates, M.J. (1989) ["The design of browsing and berrypicking"](https://pages.gseis.ucla.edu/faculty/bates/berrypicking.html)
 
 ## Long content & argv limits
 
