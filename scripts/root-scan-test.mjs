@@ -76,6 +76,60 @@ test("truncateBytes: maxBytes=0 returns empty string", () => {
   assert.equal(r.text, "");
 });
 
+// ---------- parseFrontmatter ----------
+test("parseFrontmatter: no frontmatter returns null fm + full body", () => {
+  const r = scan.parseFrontmatter("# Hello\n\nbody");
+  assert.equal(r.frontmatter, null);
+  assert.equal(r.frontmatter_error, null);
+  assert.equal(r.body, "# Hello\n\nbody");
+});
+
+test("parseFrontmatter: empty frontmatter block", () => {
+  const r = scan.parseFrontmatter("---\n---\n# Body");
+  assert.deepEqual(r.frontmatter, { tags: null, aliases: null, topic: null, _raw: "" });
+  assert.equal(r.body, "# Body");
+});
+
+test("parseFrontmatter: inline array tags", () => {
+  const md = "---\ntags: [webrtc, network]\ntopic: webrtc\n---\nbody";
+  const r = scan.parseFrontmatter(md);
+  assert.deepEqual(r.frontmatter.tags, ["webrtc", "network"]);
+  assert.equal(r.frontmatter.topic, "webrtc");
+  assert.equal(r.frontmatter.aliases, null);
+  assert.equal(r.body, "body");
+});
+
+test("parseFrontmatter: block list tags", () => {
+  const md = "---\ntags:\n  - a\n  - b\n---\nbody";
+  const r = scan.parseFrontmatter(md);
+  assert.deepEqual(r.frontmatter.tags, ["a", "b"]);
+});
+
+test("parseFrontmatter: single string tag becomes array", () => {
+  const md = "---\ntags: solo\n---\nbody";
+  const r = scan.parseFrontmatter(md);
+  assert.deepEqual(r.frontmatter.tags, ["solo"]);
+});
+
+test("parseFrontmatter: aliases parsed same as tags", () => {
+  const md = "---\naliases: [foo, bar]\n---\nbody";
+  const r = scan.parseFrontmatter(md);
+  assert.deepEqual(r.frontmatter.aliases, ["foo", "bar"]);
+});
+
+test("parseFrontmatter: malformed (no closing ---)", () => {
+  const r = scan.parseFrontmatter("---\ntags: x\n# Body");
+  assert.equal(r.frontmatter, null);
+  assert.ok(r.frontmatter_error && r.frontmatter_error.length > 0);
+  assert.equal(r.body, "---\ntags: x\n# Body");
+});
+
+test("parseFrontmatter: preserves raw block", () => {
+  const md = "---\ntags: [x]\ncustom: keep me\n---\nbody";
+  const r = scan.parseFrontmatter(md);
+  assert.ok(r.frontmatter._raw.includes("custom: keep me"));
+});
+
 await Promise.all(pending);
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
