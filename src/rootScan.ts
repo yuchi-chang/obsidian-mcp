@@ -12,11 +12,11 @@
  * case-insensitive (matches Windows vault behavior).
  */
 export function matchGlob(pattern: string, path: string): boolean {
-  const pSegs = pattern.toLowerCase().split("/");
-  const tSegs = path.toLowerCase().split("/");
-  if (pSegs.length !== tSegs.length) return false;
-  for (let i = 0; i < pSegs.length; i++) {
-    if (!segmentMatch(pSegs[i], tSegs[i])) return false;
+  const patternSegs = pattern.toLowerCase().split("/");
+  const pathSegs = path.toLowerCase().split("/");
+  if (patternSegs.length !== pathSegs.length) return false;
+  for (let i = 0; i < patternSegs.length; i++) {
+    if (!segmentMatch(patternSegs[i], pathSegs[i])) return false;
   }
   return true;
 }

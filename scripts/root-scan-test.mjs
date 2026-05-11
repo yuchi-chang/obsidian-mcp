@@ -4,14 +4,18 @@ import assert from "node:assert/strict";
 
 let passed = 0;
 let failed = 0;
+const pending = [];
 function test(name, fn) {
   try {
     const r = fn();
     if (r && typeof r.then === "function") {
-      return r.then(
-        () => { console.log("✓", name); passed++; },
-        (err) => { console.error("✗", name); console.error("  ", err.message); failed++; },
+      pending.push(
+        r.then(
+          () => { console.log("✓", name); passed++; },
+          (err) => { console.error("✗", name); console.error("  ", err.message); failed++; },
+        ),
       );
+      return;
     }
     console.log("✓", name);
     passed++;
@@ -45,5 +49,6 @@ test("matchGlob: case insensitive", () => {
   assert.equal(scan.matchGlob("daily/*", "Daily/foo.md"), true);
 });
 
+await Promise.all(pending);
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
