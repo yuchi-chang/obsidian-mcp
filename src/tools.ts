@@ -2,8 +2,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getLimit, shouldChunk, splitForCli } from "./chunk.js";
 import { ObsidianCliError, parseJsonOrText, runObsidian } from "./exec.js";
-import { findSimilarFolders, type FolderMatch } from "./folderSearch.js";
+import { findSimilarFolders, listVaultFolders, type FolderMatch } from "./folderSearch.js";
 import { scanRoot } from "./rootScan.js";
+import { applyPlan, validatePlan } from "./organize.js";
 import {
   getStats,
   loadStore,
@@ -572,6 +573,110 @@ export const tools: ToolDef[] = [
     handler: async ({ vault, ignore, preview_bytes, max_files }) => {
       try {
         const result = await scanRoot({ vault, ignore, preview_bytes, max_files });
+        return textResult(JSON.stringify(result, null, 2), result as unknown as Record<string, unknown>);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  },
+
+  {
+    name: "obsidian_organize_apply",
+    title: "Apply a root-organize plan",
+    description:
+      "Validates a routing plan and (if `dry_run=false`) moves the listed root notes " +
+      "into their target folders. Folders that don't exist are created during the move. " +
+      "When an entry has a `topic`, the topic→folder mapping is recorded in the persistent " +
+      "topic store after a successful move (set `register_topics=false` to opt out).\n\n" +
+      "ALWAYS dry-run first: call with `dry_run=true` to see the predicted outcome, " +
+      "then re-call with `dry_run=false` once the plan looks right. The output shape is " +
+      "identical between modes.\n\n" +
+      "Per-entry failure isolation: a single move failure marks that entry `status: \"failed\"` " +
+      "but does not stop the rest of the batch.",
+    inputSchema: {
+      ...VaultArg,
+      plan: z
+        .array(
+          z.object({
+            path: z
+              .string()
+              .min(1)
+              .describe("Vault-relative path of a root-level .md file."),
+            target_folder: z
+              .string()
+              .describe(
+                "Vault-relative target folder. Empty string, '/', or '.' means keep at root.",
+              ),
+            topic: z
+              .string()
+              .optional()
+              .describe(
+                "Optional topic facet. Recorded in the persistent topic store on successful move.",
+              ),
+            reason: z
+              .string()
+              .optional()
+              .describe("Optional free-text rationale, ignored by the tool but echoed back."),
+          }),
+        )
+        .min(1)
+        .describe("Routing plan — one entry per root note to move."),
+      dry_run: z
+        .boolean()
+        .describe(
+          "Required. When true, validates and returns the predicted outcome WITHOUT moving any files. " +
+            "When false, performs the moves after the standard confirmation prompt.",
+        ),
+      register_topics: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true (default), records topic→folder mappings in the topic store after successful moves.",
+        ),
+      ...ConfirmArg,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    confirm: {
+      action: ({ plan }: { plan: Array<{ target_folder: string }> }) =>
+        `Reorganize ${plan.length} root note${plan.length === 1 ? "" : "s"}`,
+      detail: ({ plan }: { plan: Array<{ target_folder: string }> }) => {
+        const folders = new Set(
+          plan.map((p) => p.target_folder.replace(/^[\\/]+|[\\/]+$/g, "")).filter((f) => f),
+        );
+        return `${plan.length} note(s) → ${folders.size} folder(s)`;
+      },
+    },
+    handler: async ({ vault, plan, dry_run, register_topics }) => {
+      try {
+        const [existingFolders, filesRes] = await Promise.all([
+          listVaultFolders(vault),
+          runObsidian("files", { vault, format: "json" }),
+        ]);
+        const filesParsed = parseJsonOrText(filesRes.stdout);
+        const existingFiles: string[] = Array.isArray(filesParsed)
+          ? filesParsed
+              .map((e: unknown) =>
+                e && typeof e === "object" && "path" in e ? String((e as { path: unknown }).path) : "",
+              )
+              .filter((p: string) => p.length > 0)
+          : [];
+
+        const validated = validatePlan({ plan, existingFolders, existingFiles });
+        if (!validated.ok) {
+          return errorResult(new Error(validated.error));
+        }
+
+        const vaultKey = vault ?? "_default";
+        const result = await applyPlan({
+          validated,
+          dry_run,
+          register_topics,
+          vault,
+          runner: runObsidian,
+          topicRecorder: (topic, folder) => {
+            recordUse(vaultKey, topic, folder);
+          },
+        });
         return textResult(JSON.stringify(result, null, 2), result as unknown as Record<string, unknown>);
       } catch (err) {
         return errorResult(err);
