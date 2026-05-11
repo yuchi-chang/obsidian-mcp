@@ -49,6 +49,33 @@ test("matchGlob: case insensitive", () => {
   assert.equal(scan.matchGlob("daily/*", "Daily/foo.md"), true);
 });
 
+// ---------- truncateBytes ----------
+test("truncateBytes: short string returns unchanged", () => {
+  const r = scan.truncateBytes("hello", 100);
+  assert.equal(r.text, "hello");
+  assert.equal(r.full_bytes, 5);
+});
+
+test("truncateBytes: ASCII truncates to exact byte count", () => {
+  const r = scan.truncateBytes("hello world", 5);
+  assert.equal(r.text, "hello");
+  assert.equal(r.full_bytes, 11);
+});
+
+test("truncateBytes: never splits a multi-byte UTF-8 char", () => {
+  // "中" is 3 bytes in UTF-8.
+  const s = "abc中文";
+  // 4 bytes would split "中" mid-character → should fall back to 3 bytes ("abc").
+  const r = scan.truncateBytes(s, 4);
+  assert.equal(r.text, "abc");
+  assert.equal(r.full_bytes, Buffer.byteLength(s, "utf8"));
+});
+
+test("truncateBytes: maxBytes=0 returns empty string", () => {
+  const r = scan.truncateBytes("anything", 0);
+  assert.equal(r.text, "");
+});
+
 await Promise.all(pending);
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
