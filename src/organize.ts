@@ -164,6 +164,13 @@ export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
     for (const item of items) {
       if (item.status !== "ok") continue;
       try {
+        // Assumes the CLI auto-creates intermediate folders, matching the
+        // documented behavior of `obsidian create`. If a future CLI version
+        // rejects missing destinations, the failure will surface as a per-item
+        // `status: "failed"` rather than aborting the batch — and Task 10 in
+        // the plan describes an `ensureFolders` placeholder-based fallback to
+        // pick up here. Verify with `scripts/organize-smoke.mjs` against a
+        // throwaway vault.
         await runner("move", { vault, params: { path: item.path, to: item.to } });
         applied++;
         if (register_topics && item.topic) {
