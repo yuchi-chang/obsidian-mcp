@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getLimit, shouldChunk, splitForCli } from "./chunk.js";
 import { ObsidianCliError, parseJsonOrText, runObsidian } from "./exec.js";
 import { findSimilarFolders, type FolderMatch } from "./folderSearch.js";
+import { scanRoot } from "./rootScan.js";
 import {
   getStats,
   loadStore,
@@ -534,6 +535,48 @@ export const tools: ToolDef[] = [
       format === "json"
         ? runJson("folders", { vault, format: "json" })
         : runText("folders", { vault, format }),
+  },
+  {
+    name: "obsidian_scan_root",
+    title: "Scan vault root for loose notes",
+    description:
+      "Lists every .md file at the vault root with frontmatter and a body preview. " +
+      "Use this as the first step of bulk-organize: feed the result to a classifier " +
+      "(LLM) that decides per-note where each should go, then call " +
+      "`obsidian_organize_apply` with the resulting plan.\n\n" +
+      "Files inside subfolders are NOT included. `ignore` accepts simple globs " +
+      "(e.g. ['Daily/*', '*.excalidraw.md']) matched against vault-relative paths.",
+    inputSchema: {
+      ...VaultArg,
+      ignore: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Glob patterns to exclude (matched against vault-relative paths). " +
+            "Supports `*` within a segment; no `**`.",
+        ),
+      preview_bytes: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Bytes of body preview to return per file. Default 800."),
+      max_files: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Cap on returned entries. Default 200."),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async ({ vault, ignore, preview_bytes, max_files }) => {
+      try {
+        const result = await scanRoot({ vault, ignore, preview_bytes, max_files });
+        return textResult(JSON.stringify(result, null, 2), result as unknown as Record<string, unknown>);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
   },
 
   // ---------- note read / metadata ----------
