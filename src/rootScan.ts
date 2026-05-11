@@ -147,3 +147,149 @@ function stripQuotes(s: string): string {
   }
   return s;
 }
+
+import type { runObsidian } from "./exec.js";
+type Runner = typeof runObsidian;
+
+export interface RootFile {
+  path: string;
+  size_bytes: number;
+  modified_at: string;
+  frontmatter: ParsedFrontmatter | null;
+  frontmatter_error: string | null;
+  preview: string | null;
+  body_full_bytes: number;
+  read_error: string | null;
+}
+
+export interface ScanRootResult {
+  scanned_at: string;
+  total_root_files: number;
+  returned: number;
+  truncated: boolean;
+  ignored_count: number;
+  files: RootFile[];
+}
+
+export interface ScanRootOptions {
+  vault?: string;
+  ignore?: string[];
+  preview_bytes?: number;
+  max_files?: number;
+  /** Concurrency limit for `read` calls. Default 5. */
+  concurrency?: number;
+  /** DI seam for tests. Defaults to the real `runObsidian`. */
+  runner?: Runner;
+}
+
+interface FilesEntry {
+  path: string;
+  size?: number;
+  mtime?: string;
+}
+
+export async function scanRoot(opts: ScanRootOptions = {}): Promise<ScanRootResult> {
+  const {
+    vault,
+    ignore = [],
+    preview_bytes = 800,
+    max_files = 200,
+    concurrency = 5,
+  } = opts;
+  const runner = opts.runner ?? (await import("./exec.js")).runObsidian;
+
+  const listRes = await runner("files", { vault, format: "json" });
+  let entries: FilesEntry[];
+  try {
+    const parsed = JSON.parse(listRes.stdout);
+    entries = Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    throw new Error(
+      `Failed to parse files JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Root level only: path with no '/' and ending in .md
+  const rootMd = entries.filter(
+    (e) => typeof e.path === "string" && !e.path.includes("/") && e.path.toLowerCase().endsWith(".md"),
+  );
+
+  // Apply ignore globs.
+  const kept: FilesEntry[] = [];
+  let ignored = 0;
+  for (const e of rootMd) {
+    if (ignore.some((g) => matchGlob(g, e.path))) {
+      ignored++;
+    } else {
+      kept.push(e);
+    }
+  }
+
+  const total = kept.length;
+  const truncated = total > max_files;
+  const slice = truncated ? kept.slice(0, max_files) : kept;
+
+  // Bounded concurrency.
+  const files: RootFile[] = await mapConcurrent(slice, concurrency, async (e) => {
+    let raw: string | null = null;
+    let read_error: string | null = null;
+    try {
+      const r = await runner("read", { vault, params: { path: e.path } });
+      raw = r.stdout;
+    } catch (err) {
+      read_error = err instanceof Error ? err.message : String(err);
+    }
+    if (raw === null) {
+      return {
+        path: e.path,
+        size_bytes: e.size ?? 0,
+        modified_at: e.mtime ?? "",
+        frontmatter: null,
+        frontmatter_error: null,
+        preview: null,
+        body_full_bytes: 0,
+        read_error,
+      };
+    }
+    const { frontmatter, frontmatter_error, body } = parseFrontmatter(raw);
+    const trunc = truncateBytes(body, preview_bytes);
+    return {
+      path: e.path,
+      size_bytes: e.size ?? 0,
+      modified_at: e.mtime ?? "",
+      frontmatter,
+      frontmatter_error,
+      preview: trunc.text,
+      body_full_bytes: trunc.full_bytes,
+      read_error: null,
+    };
+  });
+
+  return {
+    scanned_at: new Date().toISOString(),
+    total_root_files: total,
+    returned: files.length,
+    truncated,
+    ignored_count: ignored,
+    files,
+  };
+}
+
+async function mapConcurrent<T, U>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<U>,
+): Promise<U[]> {
+  const results: U[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}

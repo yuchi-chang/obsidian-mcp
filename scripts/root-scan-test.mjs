@@ -130,6 +130,118 @@ test("parseFrontmatter: preserves raw block", () => {
   assert.ok(r.frontmatter._raw.includes("custom: keep me"));
 });
 
+// ---------- scanRoot orchestration ----------
+
+// Build a stub runner that returns canned responses keyed by command + params.
+function makeRunner(responses) {
+  return async (command, opts = {}) => {
+    const key = command + ":" + JSON.stringify(opts.params ?? {});
+    if (!(key in responses)) {
+      throw new Error(`unstubbed call: ${key}`);
+    }
+    const r = responses[key];
+    if (r instanceof Error) throw r;
+    return { command: key, stdout: r, stderr: "", exitCode: 0 };
+  };
+}
+
+test("scanRoot: filters out subfolder entries", async () => {
+  const filesJson = JSON.stringify([
+    { path: "Note A.md", size: 100, mtime: "2026-05-01T00:00:00Z" },
+    { path: "Folder/Sub.md", size: 50, mtime: "2026-05-01T00:00:00Z" },
+    { path: "Note B.md", size: 200, mtime: "2026-05-02T00:00:00Z" },
+  ]);
+  const runner = makeRunner({
+    'files:{}': filesJson,
+    'read:{"path":"Note A.md"}': "# A\nbody",
+    'read:{"path":"Note B.md"}': "# B\nbody",
+  });
+  const r = await scan.scanRoot({ runner });
+  assert.equal(r.total_root_files, 2);
+  assert.equal(r.files.length, 2);
+  assert.deepEqual(r.files.map((f) => f.path).sort(), ["Note A.md", "Note B.md"]);
+});
+
+test("scanRoot: applies ignore globs", async () => {
+  const filesJson = JSON.stringify([
+    { path: "Note.md", size: 100, mtime: "2026-05-01T00:00:00Z" },
+    { path: "drawing.excalidraw.md", size: 1000, mtime: "2026-05-01T00:00:00Z" },
+  ]);
+  const runner = makeRunner({
+    'files:{}': filesJson,
+    'read:{"path":"Note.md"}': "body",
+  });
+  const r = await scan.scanRoot({ runner, ignore: ["*.excalidraw.md"] });
+  assert.equal(r.ignored_count, 1);
+  assert.equal(r.files.length, 1);
+  assert.equal(r.files[0].path, "Note.md");
+});
+
+test("scanRoot: max_files truncates with flag", async () => {
+  const filesJson = JSON.stringify([
+    { path: "A.md", size: 1, mtime: "2026-05-01T00:00:00Z" },
+    { path: "B.md", size: 1, mtime: "2026-05-01T00:00:00Z" },
+    { path: "C.md", size: 1, mtime: "2026-05-01T00:00:00Z" },
+  ]);
+  const runner = makeRunner({
+    'files:{}': filesJson,
+    'read:{"path":"A.md"}': "a",
+    'read:{"path":"B.md"}': "b",
+  });
+  const r = await scan.scanRoot({ runner, max_files: 2 });
+  assert.equal(r.truncated, true);
+  assert.equal(r.returned, 2);
+  assert.equal(r.total_root_files, 3);
+});
+
+test("scanRoot: read failure isolates to one entry", async () => {
+  const filesJson = JSON.stringify([
+    { path: "Good.md", size: 1, mtime: "2026-05-01T00:00:00Z" },
+    { path: "Bad.md", size: 1, mtime: "2026-05-01T00:00:00Z" },
+  ]);
+  const runner = makeRunner({
+    'files:{}': filesJson,
+    'read:{"path":"Good.md"}': "ok body",
+    'read:{"path":"Bad.md"}': new Error("file locked"),
+  });
+  const r = await scan.scanRoot({ runner });
+  const bad = r.files.find((f) => f.path === "Bad.md");
+  const good = r.files.find((f) => f.path === "Good.md");
+  assert.equal(bad.preview, null);
+  assert.ok(bad.read_error.includes("file locked"));
+  assert.equal(good.preview, "ok body");
+  assert.equal(good.read_error, null);
+});
+
+test("scanRoot: preview is byte-truncated", async () => {
+  const long = "a".repeat(2000);
+  const filesJson = JSON.stringify([
+    { path: "Long.md", size: 2000, mtime: "2026-05-01T00:00:00Z" },
+  ]);
+  const runner = makeRunner({
+    'files:{}': filesJson,
+    'read:{"path":"Long.md"}': long,
+  });
+  const r = await scan.scanRoot({ runner, preview_bytes: 100 });
+  assert.equal(r.files[0].preview.length, 100);
+  assert.equal(r.files[0].body_full_bytes, 2000);
+});
+
+test("scanRoot: extracts frontmatter into entry", async () => {
+  const md = "---\ntags: [webrtc]\ntopic: webrtc\n---\nbody";
+  const filesJson = JSON.stringify([
+    { path: "Note.md", size: 100, mtime: "2026-05-01T00:00:00Z" },
+  ]);
+  const runner = makeRunner({
+    'files:{}': filesJson,
+    'read:{"path":"Note.md"}': md,
+  });
+  const r = await scan.scanRoot({ runner });
+  assert.deepEqual(r.files[0].frontmatter.tags, ["webrtc"]);
+  assert.equal(r.files[0].frontmatter.topic, "webrtc");
+  assert.equal(r.files[0].preview, "body");
+});
+
 await Promise.all(pending);
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
