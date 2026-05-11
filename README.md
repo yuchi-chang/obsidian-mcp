@@ -170,6 +170,8 @@ If `obsidian` isn't on `PATH`, set the `OBSIDIAN_CLI` env var. Works with either
 | `obsidian_topic_stats` | reports the persistent topic → folder map for a vault |
 | `obsidian_register_topic` | binds a topic to a folder (no prompt) |
 | `obsidian_remove_topic` | removes a topic from the persistent store |
+| `obsidian_scan_root` | lists root-level notes with preview for bulk-organize |
+| `obsidian_organize_apply` | validates + applies a routing plan (dry-run supported) |
 | `obsidian_version` | `obsidian version` |
 | `obsidian_help` | `obsidian help` |
 
@@ -258,6 +260,39 @@ Faceted folder routing here is the simplest slice of a much larger idea. Worth r
 - Tiago Forte (2022) *Building a Second Brain* — PARA method (actionability axis)
 - Niklas Luhmann (1981) "Kommunikation mit Zettelkästen" — graph-over-tree
 - Bates, M.J. (1989) ["The design of browsing and berrypicking"](https://pages.gseis.ucla.edu/faculty/bates/berrypicking.html)
+
+## Bulk organize root notes
+
+When the vault root accumulates loose `.md` files, a caller LLM can sweep them into the right subfolders in three steps:
+
+1. **Scan** — list root notes with metadata + body preview:
+
+   ```jsonc
+   // tool: obsidian_scan_root
+   { "ignore": ["Daily/*", "*.excalidraw.md"] }
+   ```
+
+2. **Classify (caller side)** — the LLM reads each preview and proposes a routing plan:
+
+   ```jsonc
+   [
+     { "path": "WebRTC 連線建立流程.md", "target_folder": "webrtc", "topic": "webrtc", "reason": "covers signaling/SDP/ICE" },
+     { "path": "舊筆記.md", "target_folder": "Notes", "topic": "misc" }
+   ]
+   ```
+
+3. **Apply** — dry-run first to preview, then call again with `dry_run: false`:
+
+   ```jsonc
+   // tool: obsidian_organize_apply
+   { "plan": [...], "dry_run": true }
+   // → { "summary": { "will_move": 2, "will_create_folders": 1, ... }, "items": [...] }
+
+   { "plan": [...], "dry_run": false, "confirm": true }
+   // → moves files, creates new folders as needed, registers topic→folder mappings
+   ```
+
+Per-entry failure isolation: a single move failure marks that entry `status: "failed"` without aborting the rest of the batch. Successful moves with a `topic` field are recorded in the persistent topic store, so future single-note writes for that topic auto-route.
 
 ## Long content & argv limits
 
