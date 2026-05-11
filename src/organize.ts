@@ -130,3 +130,64 @@ export function validatePlan(args: {
 
   return { ok: true, items, summary, new_folders: newFolders };
 }
+
+import type { runObsidian } from "./exec.js";
+type Runner = typeof runObsidian;
+
+export type TopicRecorder = (topic: string, folder: string) => void;
+
+export interface ApplyResult {
+  dry_run: boolean;
+  summary: PlanSummary;
+  new_folders: string[];
+  items: ValidatedItem[];
+  warnings: string[];
+}
+
+export interface ApplyOptions {
+  validated: Extract<ValidationResult, { ok: true }>;
+  dry_run: boolean;
+  register_topics?: boolean;
+  vault?: string;
+  runner: Runner;
+  topicRecorder: TopicRecorder;
+}
+
+export async function applyPlan(opts: ApplyOptions): Promise<ApplyResult> {
+  const { validated, dry_run, register_topics = true, vault, runner, topicRecorder } = opts;
+  const items = validated.items.map((i) => ({ ...i }));
+  const warnings: string[] = [];
+  let applied = 0;
+  let failed = 0;
+
+  if (!dry_run) {
+    for (const item of items) {
+      if (item.status !== "ok") continue;
+      try {
+        await runner("move", { vault, params: { path: item.path, to: item.to } });
+        applied++;
+        if (register_topics && item.topic) {
+          try {
+            topicRecorder(item.topic, item.target_folder);
+          } catch (err) {
+            warnings.push(
+              `recordUse failed for topic="${item.topic}": ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+      } catch (err) {
+        item.status = "failed";
+        item.error = err instanceof Error ? err.message : String(err);
+        failed++;
+      }
+    }
+  }
+
+  return {
+    dry_run,
+    summary: { ...validated.summary, applied, failed },
+    new_folders: validated.new_folders,
+    items,
+    warnings,
+  };
+}
