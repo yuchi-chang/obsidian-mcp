@@ -36,28 +36,15 @@ export async function ensureConfirmed(
       message: `${summary}\n\nProceed?`,
       requestedSchema: {
         type: "object",
-        properties: {
-          confirm: {
-            type: "boolean",
-            title: "Proceed",
-            description: `Confirm: ${action}`,
-          },
-        },
-        required: ["confirm"],
+        properties: {},
       },
     });
 
-    if (result.action === "cancel") {
-      return { ok: false, reason: "User cancelled the operation." };
-    }
+    if (result.action === "accept") return { ok: true };
     if (result.action === "decline") {
       return { ok: false, reason: "User declined the operation." };
     }
-    // accept
-    if (result.content?.confirm !== true) {
-      return { ok: false, reason: "User did not confirm the operation." };
-    }
-    return { ok: true };
+    return { ok: false, reason: "User cancelled the operation." };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {

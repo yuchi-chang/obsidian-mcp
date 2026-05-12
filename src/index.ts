@@ -12,6 +12,9 @@ function buildHandler(server: McpServer, tool: ToolDef) {
   }
   const spec = tool.confirm;
   return async (input: any) => {
+    if (spec.skipWhen?.(input)) {
+      return tool.handler(input, ctx);
+    }
     const outcome = await ensureConfirmed(server, spec, input);
     if (!outcome.ok) {
       return errorResult(new Error(outcome.reason ?? "Confirmation required."));

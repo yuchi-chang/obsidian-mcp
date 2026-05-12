@@ -469,6 +469,8 @@ export interface ConfirmSpec {
   action: (input: any) => string;
   /** One-line detail line — typically restates the target. */
   detail: (input: any) => string;
+  /** When this returns true for the given input, the confirmation is skipped. */
+  skipWhen?: (input: any) => boolean;
 }
 
 export interface ToolDef {
@@ -645,6 +647,7 @@ export const tools: ToolDef[] = [
         );
         return `${plan.length} note(s) → ${folders.size} folder(s)`;
       },
+      skipWhen: ({ dry_run }: { dry_run?: boolean }) => dry_run === true,
     },
     handler: async ({ vault, plan, dry_run, register_topics }) => {
       try {

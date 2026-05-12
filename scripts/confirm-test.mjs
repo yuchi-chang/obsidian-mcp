@@ -97,6 +97,21 @@ try {
     "non-sensitive tool does not trigger confirm prompt",
   );
 
+  // Case 4: organize_apply with dry_run:true → skipWhen bypasses the gate
+  // even without elicitation capability and without confirm:true.
+  const r4 = await rpc(5, "tools/call", {
+    name: "obsidian_organize_apply",
+    arguments: {
+      plan: [{ path: "x.md", target_folder: "Test" }],
+      dry_run: true,
+    },
+  });
+  const text4 = r4.result?.content?.[0]?.text ?? "";
+  assert(
+    !/confirm: true/i.test(text4),
+    "organize_apply with dry_run:true skips the confirmation gate",
+  );
+
   child.kill();
   process.exit(failed ? 1 : 0);
 } catch (err) {
