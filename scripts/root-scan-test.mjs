@@ -130,6 +130,38 @@ test("parseFrontmatter: preserves raw block", () => {
   assert.ok(r.frontmatter._raw.includes("custom: keep me"));
 });
 
+// ---------- parseFilesOutput ----------
+
+test("parseFilesOutput: JSON array path", () => {
+  const json = JSON.stringify([
+    { path: "A.md", size: 1, mtime: "2026-05-01T00:00:00Z" },
+    { path: "B.md", size: 2 },
+  ]);
+  const out = scan.parseFilesOutput(json);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].path, "A.md");
+  assert.equal(out[1].size, 2);
+});
+
+test("parseFilesOutput: paths-format fallback for older CLI", () => {
+  // Older Obsidian installers ignore `format=json` for the `files` command
+  // and emit newline-separated paths instead. parseFilesOutput must accept
+  // that shape and synthesize minimal entries.
+  const txt = "Note A.md\n系統服務/db/db2 資料整理.md\nNote B.md\n";
+  const out = scan.parseFilesOutput(txt);
+  assert.equal(out.length, 3);
+  assert.deepEqual(
+    out.map((e) => e.path),
+    ["Note A.md", "系統服務/db/db2 資料整理.md", "Note B.md"],
+  );
+  assert.equal(out[0].size, undefined);
+});
+
+test("parseFilesOutput: empty string returns empty array", () => {
+  assert.deepEqual(scan.parseFilesOutput(""), []);
+  assert.deepEqual(scan.parseFilesOutput("   \n"), []);
+});
+
 // ---------- scanRoot orchestration ----------
 
 // Build a stub runner that returns canned responses keyed by command + params.
@@ -144,6 +176,22 @@ function makeRunner(responses) {
     return { command: key, stdout: r, stderr: "", exitCode: 0 };
   };
 }
+
+test("scanRoot: works against paths-format CLI output (no size/mtime)", async () => {
+  // Older Obsidian installer path: `files` returns plain paths.
+  const pathsTxt = "Note A.md\nFolder/Sub.md\nNote B.md\n";
+  const runner = makeRunner({
+    'files:{}': pathsTxt,
+    'read:{"path":"Note A.md"}': "# A\nbody",
+    'read:{"path":"Note B.md"}': "# B\nbody",
+  });
+  const r = await scan.scanRoot({ runner });
+  assert.equal(r.total_root_files, 2);
+  assert.deepEqual(r.files.map((f) => f.path).sort(), ["Note A.md", "Note B.md"]);
+  // No size/mtime in paths format — must default cleanly.
+  assert.equal(r.files[0].size_bytes, 0);
+  assert.equal(r.files[0].modified_at, "");
+});
 
 test("scanRoot: filters out subfolder entries", async () => {
   const filesJson = JSON.stringify([

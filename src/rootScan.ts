@@ -188,6 +188,24 @@ interface FilesEntry {
   mtime?: string;
 }
 
+// Newer Obsidian installers honor `format=json` for the `files` command and
+// return `[{path, size, mtime}, ...]`. Older installers ignore the format flag
+// and just print newline-separated vault-relative paths. Support both so the
+// scanner keeps working across CLI versions.
+export function parseFilesOutput(stdout: string): FilesEntry[] {
+  const trimmed = stdout.trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : [];
+  }
+  return trimmed
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .map((path) => ({ path }));
+}
+
 export async function scanRoot(opts: ScanRootOptions = {}): Promise<ScanRootResult> {
   const {
     vault,
@@ -199,15 +217,7 @@ export async function scanRoot(opts: ScanRootOptions = {}): Promise<ScanRootResu
   const runner = opts.runner ?? (await import("./exec.js")).runObsidian;
 
   const listRes = await runner("files", { vault, format: "json" });
-  let entries: FilesEntry[];
-  try {
-    const parsed = JSON.parse(listRes.stdout);
-    entries = Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    throw new Error(
-      `Failed to parse files JSON: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  const entries = parseFilesOutput(listRes.stdout);
 
   // Root level only: path with no '/' and ending in .md
   const rootMd = entries.filter(

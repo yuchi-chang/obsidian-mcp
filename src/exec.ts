@@ -67,7 +67,12 @@ export async function runObsidian(
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
     });
-    return { stdout, stderr, exitCode: 0, command: cmdline };
+    return {
+      stdout: stripObsidianBanner(stdout),
+      stderr,
+      exitCode: 0,
+      command: cmdline,
+    };
   } catch (err: unknown) {
     const e = err as NodeJS.ErrnoException & {
       stdout?: string;
@@ -75,7 +80,7 @@ export async function runObsidian(
       code?: number | string;
     };
     const result: RunResult = {
-      stdout: e.stdout ?? "",
+      stdout: stripObsidianBanner(e.stdout ?? ""),
       stderr: e.stderr ?? e.message ?? "",
       exitCode: typeof e.code === "number" ? e.code : 1,
       command: cmdline,
@@ -94,6 +99,38 @@ export async function runObsidian(
       result,
     );
   }
+}
+
+// Older Obsidian installers (<= 1.12.x at time of writing) emit two banner
+// lines to stdout on every CLI invocation:
+//
+//   <timestamp> Loading updated app package <path>
+//   Your Obsidian installer is out of date. Please download...
+//
+// These poison machine-readable output (JSON.parse on `files`, frontmatter
+// detection on `read`, etc.). Strip them at the runObsidian boundary so all
+// downstream code sees only the real payload.
+//
+// Patterns are anchored to the literal banner text — too specific to collide
+// with note content. Only consecutive matching lines at the start are dropped.
+const BANNER_PATTERNS: RegExp[] = [
+  /^\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} Loading updated app package\b.*$/,
+  /^\s*Your Obsidian installer is out of date\b.*$/,
+];
+
+export function stripObsidianBanner(stdout: string): string {
+  if (!stdout) return stdout;
+  // Strip any leading CR/LF before the first banner line.
+  let s = stdout.replace(/^(?:\r?\n)+/, "");
+  // Repeatedly peel the first line if it matches a banner pattern.
+  while (true) {
+    const nl = s.search(/\r?\n/);
+    const firstLine = nl === -1 ? s : s.slice(0, nl);
+    if (!BANNER_PATTERNS.some((re) => re.test(firstLine))) break;
+    if (nl === -1) return "";
+    s = s.slice(nl + (s[nl] === "\r" ? 2 : 1));
+  }
+  return s;
 }
 
 export function parseJsonOrText(stdout: string): unknown {
