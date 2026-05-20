@@ -51,6 +51,36 @@ function buildArgs(command: string, opts: RunOptions): string[] {
   return args;
 }
 
+// Action commands return short status text ("Moved: X -> Y", "Deleted: X",
+// etc.). On failure the CLI prints "Error: <message>" to stdout but still
+// exits 0 — see detectActionFailure below. Content-returning commands
+// (read/search/eval/...) are deliberately excluded because their stdout may
+// legitimately begin with the literal text "Error:" and we don't want to
+// false-positive on note content.
+export const ACTION_COMMANDS: ReadonlySet<string> = new Set([
+  "move",
+  "delete",
+  "create",
+  "append",
+  "prepend",
+  "property:set",
+  "property:remove",
+  "tags:rename",
+  "daily:append",
+  "plugin:enable",
+  "plugin:disable",
+  "plugin:reload",
+]);
+
+// Returns the trimmed error message when an action command's stdout indicates
+// failure, or null otherwise. Exported so unit tests can exercise the
+// detection without spawning a real CLI.
+export function detectActionFailure(command: string, cleanStdout: string): string | null {
+  if (!ACTION_COMMANDS.has(command)) return null;
+  if (!/^Error: /.test(cleanStdout.trimStart())) return null;
+  return cleanStdout.trim();
+}
+
 export async function runObsidian(
   command: string,
   opts: RunOptions = {},
@@ -67,13 +97,33 @@ export async function runObsidian(
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
     });
+    const cleanStdout = stripObsidianBanner(stdout);
+    // The Obsidian CLI prints "Error: ..." to stdout AND exits 0 when an
+    // action command (move/delete/create/...) fails. Without this check the
+    // failure surfaces as a silent success — moves report "applied" while
+    // files stay put. Throw so callers see the same shape they'd get from a
+    // proper non-zero exit.
+    const actionFailure = detectActionFailure(command, cleanStdout);
+    if (actionFailure !== null) {
+      const result: RunResult = {
+        stdout: cleanStdout,
+        stderr,
+        exitCode: 0,
+        command: cmdline,
+      };
+      throw new ObsidianCliError(
+        `obsidian ${command} reported failure: ${actionFailure}`,
+        result,
+      );
+    }
     return {
-      stdout: stripObsidianBanner(stdout),
+      stdout: cleanStdout,
       stderr,
       exitCode: 0,
       command: cmdline,
     };
   } catch (err: unknown) {
+    if (err instanceof ObsidianCliError) throw err;
     const e = err as NodeJS.ErrnoException & {
       stdout?: string;
       stderr?: string;

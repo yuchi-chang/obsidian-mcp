@@ -17,7 +17,9 @@ function test(name, fn) {
   }
 }
 
-const { stripObsidianBanner, parseJsonOrText } = await import("../dist/exec.js");
+const { stripObsidianBanner, parseJsonOrText, detectActionFailure } = await import(
+  "../dist/exec.js"
+);
 
 test("stripObsidianBanner: passes through empty string", () => {
   assert.equal(stripObsidianBanner(""), "");
@@ -74,6 +76,56 @@ test("parseJsonOrText: parses JSON when present", () => {
 
 test("parseJsonOrText: returns null on empty/whitespace input", () => {
   assert.equal(parseJsonOrText("   \n"), null);
+});
+
+// detectActionFailure: the Obsidian CLI prints "Error: ..." to stdout and
+// still exits 0 when an action command (move/delete/...) fails. These tests
+// pin down the detection that turns those silent failures into thrown
+// ObsidianCliError instances inside runObsidian.
+
+test("detectActionFailure: flags Error stdout on action command (move)", () => {
+  const stdout =
+    "Error: ENOENT: no such file or directory, rename 'a.md' -> 'New/a.md'";
+  assert.equal(detectActionFailure("move", stdout), stdout);
+});
+
+test("detectActionFailure: flags Error stdout on delete", () => {
+  assert.equal(
+    detectActionFailure("delete", 'Error: File "Missing.md" not found.'),
+    'Error: File "Missing.md" not found.',
+  );
+});
+
+test("detectActionFailure: ignores success stdout on action command", () => {
+  assert.equal(detectActionFailure("move", "Moved: a.md -> b/a.md"), null);
+});
+
+test("detectActionFailure: trims surrounding whitespace before checking prefix", () => {
+  // stripObsidianBanner may leave a leading newline; the detector must still
+  // recognise the error.
+  const stdout = "\n  Error: ENOENT: missing folder\n";
+  assert.equal(detectActionFailure("create", stdout), "Error: ENOENT: missing folder");
+});
+
+test("detectActionFailure: does NOT flag content commands (read)", () => {
+  // A note's body that legitimately begins with "Error:" must not be
+  // misinterpreted as a CLI failure.
+  const stdout = "Error: handling guide\n\nThis note documents...";
+  assert.equal(detectActionFailure("read", stdout), null);
+});
+
+test("detectActionFailure: does NOT flag eval (arbitrary user script output)", () => {
+  assert.equal(detectActionFailure("eval", "Error: something the script printed"), null);
+});
+
+test("detectActionFailure: ignores empty stdout", () => {
+  assert.equal(detectActionFailure("move", ""), null);
+});
+
+test("detectActionFailure: requires 'Error: ' prefix exactly (case-sensitive)", () => {
+  // Note bodies like "error: lowercase" or "ERROR" should not trigger.
+  assert.equal(detectActionFailure("move", "error: lowercase"), null);
+  assert.equal(detectActionFailure("move", "ERROR: SHOUTING"), null);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
